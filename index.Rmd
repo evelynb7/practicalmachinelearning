@@ -1,0 +1,318 @@
+---
+title: "Weight Lifting Exercise Prediction"
+author: "Evelyn Baskaradas"
+date: "March 30, 2017"
+output: 
+  html_document:
+    keep_md: true
+---
+<STYLE TYPE="text/css">
+<!--
+caption {
+font-weight: bold;
+font-size: 1em;
+} 
+
+.table {
+width: 50%;
+margin-left: 5%;
+font-size: 0.8em;
+}
+
+h1 {
+font-size: 180%
+}
+
+h2 {
+font-size: 150%
+}
+
+h3 {
+font-size: 120%
+}
+
+p {
+font-size: 90%;
+}
+
+li {
+font-size: 90%;
+}
+--->
+</STYLE>
+
+```{r libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(RCurl)
+library(ggplot2)
+library(GGally)
+library(lattice)
+library(caret)
+library(knitr)
+library(corrplot)
+```
+# Overview
+Using devices such as *Jawbone Up*, *Nike FuelBand*, and *Fitbit* it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement, a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did the exercise. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways, recorded in <code>classe</code> in the data set. 
+
+More information is available from the [Groupware@LES website](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).
+
+# Download the data
+The training data for this project is available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and test data [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+
+The data for this project comes from [this source](http://groupware.les.inf.puc-rio.br/har).
+
+```{r filesdl, warning=FALSE, message=FALSE, echo=FALSE}
+trainFileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testFileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+trainFileName <- "pml-training.csv"
+testFileName <- "pml-testing.csv"
+
+# Download Training set
+if(!file.exists(trainFileName))
+{
+download.file(url = trainFileUrl, destfile = trainFileName)
+cat(trainFileName)
+}
+
+# Download Testing set
+if(!file.exists(testFileName))
+{
+download.file(url = testFileUrl, destfile = testFileName)
+cat(testFileName)
+}
+
+# File download dates
+trainFileDate <- format(file.mtime(trainFileName), '%A, %B %d, %Y')
+testFileDate <- format(file.mtime(testFileName), '%A, %B %d, %Y')
+```
+
+The files were last downloaded on `r trainFileDate`.
+
+# Load, clean, and summarize the data
+First we load the data into R, substituting blanks with "NA" values. 
+Then we check the dimensions of both the training and test sets.
+
+```{r load, warning=FALSE, message=FALSE}
+training <- read.csv(trainFileName, na.strings = c("", "NA"))
+testing <- read.csv(testFileName, na.strings = c("", "NA"))
+```
+
+```{r dim, warning=FALSE, message=FALSE, echo=FALSE}
+trainingDim <- data.frame(File="Training", Observations=dim(training)[1], Variables=dim(training)[2])
+testingDim <- data.frame(File="Testing", Observations=dim(testing)[1], Variables=dim(testing)[2])
+dims <- rbind(trainingDim, testingDim)
+kable(dims, caption = "Table 1: Training and Testing set dimensions")
+```
+
+The final column <code>classe</code> contains the outcomes we will attempt to predict with the chosen model.
+
+```{r classe, warning=FALSE, message=FALSE, echo=FALSE}
+str(training$classe)
+```
+
+
+As there are `r dim(training)[2]` variables, we should determine the distribution of NA values to exclude them, thus reducing the number of variables to a more manageable set.
+
+```{r freqna, warning=FALSE, message=FALSE, echo=FALSE}
+nasum <- vector()
+
+for(n in 1:ncol(training))
+{
+nasum <- c(nasum, sum(is.na(training[,n])))
+}
+
+naDF <- data.frame(freq=nasum)
+naDF$col <- names(training)
+
+plot(freq ~ factor(col), naDF, las = 2, xlab = "Training data variables", ylab = "NA frequency", main = "Figure 1: NAs in training set", xaxt = "n", yaxt = "n")
+axis(1,cex.axis=0.7)
+axis(2,cex.axis=0.7)
+
+nacol <- vector()
+
+for(i in 1:ncol(training))
+{
+if(sum(is.na(training[,i])) > nrow(training)*0.01)
+{
+nacol <- c(nacol, i)
+}
+}
+```
+
+We find that there are `r length(nacol)` columns with NA values that can be excluded.
+
+We can also exclude the first 7 columns with names, timestamps, and other data that are not pertinent to predicting <code>classe</code>.
+
+```{r seven, warning=FALSE, message=FALSE, echo=FALSE}
+names(training)[1:7]
+```
+
+```{r varselect, warning=FALSE, message=FALSE, echo=FALSE}
+training <- subset(training, select = -c(1:7, nacol))
+testing <- subset(testing, select = -c(1:7, nacol))
+
+trainingNewDim <- data.frame(File="Training", Observations=dim(training)[1], Variables=dim(training)[2])
+testingNewDim <- data.frame(File="Testing", Observations=dim(testing)[1], Variables=dim(testing)[2])
+newDims <- rbind(trainingNewDim, testingNewDim)
+kable(newDims, caption = "Table 2: Training and Testing set dimensions excluding NAs")
+```
+
+# Create validation set
+We then create a validation set from the training set to estimate how well the chosen model has been trained.
+
+```{r valset, warning=FALSE, message=FALSE}
+set.seed(123)
+inTrain <- createDataPartition(y = training$classe, p = 0.7, list = FALSE)
+training <- training[inTrain,]
+validation <- training[-inTrain,]
+```
+
+```{r valsetdim, warning=FALSE, message=FALSE, echo=FALSE}
+trainingSplitDim <- data.frame(File="Training", Observations=dim(training)[1], Variables=dim(training)[2])
+validationDim <- data.frame(File="Validation", Observations=dim(validation)[1], Variables=dim(validation)[2])
+valDims <- rbind(trainingSplitDim, validationDim)
+kable(valDims, caption = "Table 3: Training and Validation set dimensions")
+```
+
+# Model Building
+
+## Variable selection
+In building models, we should see if there are highly correlated variables that can be excluded to reduce variance.
+
+Let's take a look at the correlations.
+
+```{r corrmap, warning=FALSE, message=FALSE, echo=FALSE}
+corrplot(cor(subset(training, select = -53)),
+method = "color",
+type = "lower",
+col = colorRampPalette(c("grey", "white", "black"))(10),
+tl.col = "black",
+tl.srt = 45,
+tl.cex = 0.5,
+diag = FALSE,
+mar=c(0,0,1,0),
+title = "Figure 2: Training set correlation map")
+```
+
+
+
+```{r corrcalc, warning=FALSE, message=FALSE, echo=FALSE}
+# Find the highly correlated variables for exclusion
+corMatrix <- cor(training[,1:52])
+hiCor <- findCorrelation(corMatrix, cutoff = 0.75)
+
+# Created subset training excluding highly correlated variables
+newtraining <- subset(training, select = -hiCor)
+```
+
+By removing variables that a highly correlated (> |0.75|), we are able to reduce the predictors further to the following `r ncol(newtraining) -1` variables.
+
+```{r predictors, warning=FALSE, message=FALSE, echo=FALSE}
+names(newtraining)[-32]
+```
+
+## Cross validation
+
+We shall use k-fold Cross Validation to estimate the accuracy of the model.
+In this case, the dataset will be split into 3 subsets (k = 3).
+
+```{r cv, warning=FALSE, message=FALSE}
+control <- trainControl(method = "cv", number = 3)
+metric <- "Accuracy"
+```
+
+## Test Models
+We shall test the accuracies of a number of models; Linear Discriminant Analysis (LDA), Random Forests (RF), and Gradient Boosting Machine (GBM).
+
+### Linear Discriminant Analysis (LDA)
+```{r lda, warning=FALSE, message=FALSE, cache=TRUE}
+set.seed(123)
+modLDA <- train(classe ~ ., 
+data = newtraining, 
+method = "lda", 
+metric = metric, 
+trControl = control)
+```
+
+### Random Forests (RF)
+
+```{r rf, warning=FALSE, message=FALSE, cache=TRUE}
+set.seed(123)
+modRF <- train(classe ~ ., 
+data = newtraining, 
+method = "rf", 
+metric = metric, 
+trControl = control,
+ntree = 100,
+prox = TRUE)
+```
+
+### Gradient Boosting Machine (GBM)
+
+```{r gbm, warning=FALSE, message=FALSE, cache=TRUE}
+set.seed(123)
+modGBM <- train(classe ~ ., 
+data = newtraining, 
+method = "gbm", 
+metric = metric, 
+trControl = control,
+verbose = FALSE)
+```
+
+## Accuracy results
+
+The accuracies of each model are as follows:
+
+```{r results, warning=FALSE, message=FALSE, echo=FALSE}
+results <- data.frame(LDA=round(mean(modLDA$resample$Accuracy)*100,2),
+RF=round(mean(modRF$resample$Accuracy)*100,2),
+GBM=round(mean(modGBM$resample$Accuracy)*100,2))
+results$LDA <- paste(results$LDA, "%")
+results$RF <- paste(results$RF, "%")
+results$GBM <- paste(results$GBM, "%")
+
+kable(results, caption = "Table 4: Model accuracies")
+```
+
+# Model selection
+We select Random Forest as it has the highest accuracy among all the models at `r round(mean(modRF$resample$Accuracy)*100,2)`%.
+
+Note that training the RF model with the default <code>ntree</code> = 500 showed the error rates minimized at around 100 trees. By setting <code>ntree</code> = 100, the time taken to train the model reduced by 30%.
+
+```{r selectmod, warning=FALSE, message=FALSE, echo=FALSE}
+print(modRF)
+```
+
+# Predict on Validation set
+
+We apply the model to the validation set to estimate the prediction accuracy using the RF model.
+
+```{r validate, warning=FALSE, message=FALSE}
+predictions <- predict(modRF, validation)
+confMat <- confusionMatrix(predictions, validation$classe)
+
+print(confMat)
+```
+
+The prediction accuracy is `r confMat$overall['Accuracy']*100`%, and therefore the out of sample error is `r (1 - confMat$overall['Accuracy'])*100`%.
+
+# Predict on Test set
+
+Similar 100% accuracy is also achieved when the model is applied to the test set.
+
+```{r testpred, warning=FALSE, message=FALSE, echo=FALSE}
+predTest <- predict(modRF, testing)
+predTestDF <- as.data.frame(predTest)
+colnames(predTestDF) <- c("Prediction")
+predTestDF <- cbind(testing[53], predTestDF)
+predTestDF <- t(predTestDF)
+predTestDF <- cbind(problem_id = row.names(predTestDF), predTestDF)
+predTestDF <- predTestDF[-1,]
+kable(t(predTestDF), caption = "Table 5: Testing set predictions")
+```
+
+# Conclusion
+
+The Random Forest model proved to be robust in terms of accuracy on both the validation and testing data sets. The main drawback in the long processing time taken for training the model was mitigated by first reducing the number of predictors (`r ncol(training) + 106` to `r ncol(newtraining) - 1`) and then the ntree number (500 to 100) where the minimum error rates begin to plateau.
